@@ -1,12 +1,12 @@
 // Content script cho MaxImg Proxy
-// Chịu trách nhiệm thay đổi src của img và video elements
+// Chỉ xử lý ảnh (img elements), không xử lý video
 
 (function() {
   'use strict';
   
   const PROXY_BASE = 'https://imax.ibyteproxy.workers.dev/?url=';
   let isProxyEnabled = false;
-  let originalSources = new WeakMap(); // Lưu trữ src gốc
+  let originalSources = new WeakMap(); // Lưu trữ src gốc của images
   
   // Kiểm tra xem URL có phải là proxy không
   function isProxyUrl(url) {
@@ -38,9 +38,22 @@
     }
   }
   
+  // Kiểm tra xem có phải ảnh không (optional check)
+  function isImageUrl(url) {
+    if (!url) return false;
+    
+    // Kiểm tra extension
+    const imageExtensions = /\.(jpe?g|png|gif|webp|bmp|svg|avif|ico|tiff|tif)(\?.*)?$/i;
+    return imageExtensions.test(url);
+  }
+  
   // Xử lý img elements
   function processImage(img) {
     if (!img.src) return;
+    
+    // Optional: chỉ proxy những URL có vẻ là ảnh
+    // Uncomment dòng dưới nếu muốn filter chặt hơn
+    // if (!isImageUrl(img.src) && !isProxyUrl(img.src)) return;
     
     if (isProxyEnabled) {
       // Lưu src gốc nếu chưa có
@@ -69,117 +82,50 @@
     }
   }
   
-  // Xử lý video elements  
-  function processVideo(video) {
-    if (!video.src && !video.currentSrc) return;
-    
-    const currentSrc = video.currentSrc || video.src;
-    if (!currentSrc) return;
-    
-    let shouldReload = false;
-    
-    if (isProxyEnabled) {
-      // Lưu src gốc nếu chưa có
-      if (!originalSources.has(video)) {
-        const originalSrc = isProxyUrl(currentSrc) ? restoreOriginalUrl(currentSrc) : currentSrc;
-        originalSources.set(video, originalSrc);
-      }
-      
-      // Chuyển sang proxy URL
-      const originalSrc = originalSources.get(video);
-      const proxyUrl = createProxyUrl(originalSrc);
-      if (video.src !== proxyUrl) {
-        // Lưu thời gian hiện tại để khôi phục sau khi reload
-        const currentTime = video.currentTime;
-        const wasPlaying = !video.paused;
-        
-        video.src = proxyUrl;
-        shouldReload = true;
-        
-        // Khôi phục trạng thái sau khi load
-        video.addEventListener('loadedmetadata', function onLoaded() {
-          video.removeEventListener('loadedmetadata', onLoaded);
-          if (currentTime > 0) {
-            video.currentTime = currentTime;
-          }
-          if (wasPlaying) {
-            video.play().catch(() => {});
-          }
-        });
-      }
-    } else {
-      // Khôi phục src gốc
-      if (originalSources.has(video)) {
-        const originalSrc = originalSources.get(video);
-        if (video.src !== originalSrc) {
-          const currentTime = video.currentTime;
-          const wasPlaying = !video.paused;
-          
-          video.src = originalSrc;
-          shouldReload = true;
-          
-          video.addEventListener('loadedmetadata', function onLoaded() {
-            video.removeEventListener('loadedmetadata', onLoaded);
-            if (currentTime > 0) {
-              video.currentTime = currentTime;
-            }
-            if (wasPlaying) {
-              video.play().catch(() => {});
-            }
-          });
-        }
-      } else if (isProxyUrl(currentSrc)) {
-        const currentTime = video.currentTime;
-        const wasPlaying = !video.paused;
-        
-        video.src = restoreOriginalUrl(currentSrc);
-        shouldReload = true;
-        
-        video.addEventListener('loadedmetadata', function onLoaded() {
-          video.removeEventListener('loadedmetadata', onLoaded);
-          if (currentTime > 0) {
-            video.currentTime = currentTime;
-          }
-          if (wasPlaying) {
-            video.play().catch(() => {});
-          }
-        });
-      }
-    }
-    
-    // Reload video để áp dụng src mới
-    if (shouldReload) {
-      video.load();
-    }
-  }
-  
-  // Xử lý tất cả images và videos hiện có
-  function processAllMediaElements() {
-    // Xử lý tất cả img
+  // Xử lý tất cả images hiện có
+  function processAllImages() {
+    // Xử lý tất cả img elements
     document.querySelectorAll('img').forEach(processImage);
     
-    // Xử lý tất cả video
-    document.querySelectorAll('video').forEach(processVideo);
+    // Xử lý img trong picture elements
+    document.querySelectorAll('picture img').forEach(processImage);
+    
+    // Xử lý background-image trong CSS (optional - advanced)
+    if (isProxyEnabled) {
+      processBackgroundImages();
+    }
   }
   
-  // Observer để theo dõi elements mới được thêm vào DOM
-  const observer = new MutationObserver((mutations) => {
-    if (!isProxyEnabled) return; // Chỉ xử lý khi proxy được bật
+  // Xử lý background-image CSS (optional feature)
+  function processBackgroundImages() {
+    const elementsWithBg = document.querySelectorAll('[style*="background-image"]');
     
+    elementsWithBg.forEach(element => {
+      const style = element.style.backgroundImage;
+      if (style && style.includes('url(')) {
+        const urlMatch = style.match(/url\(['"]?(.*?)['"]?\)/);
+        if (urlMatch && urlMatch[1] && !isProxyUrl(urlMatch[1])) {
+          const originalUrl = urlMatch[1];
+          const proxyUrl = createProxyUrl(originalUrl);
+          element.style.backgroundImage = style.replace(originalUrl, proxyUrl);
+        }
+      }
+    });
+  }
+  
+  // Observer để theo dõi img elements mới được thêm vào DOM
+  const observer = new MutationObserver((mutations) => {
     mutations.forEach((mutation) => {
       mutation.addedNodes.forEach((node) => {
         if (node.nodeType === Node.ELEMENT_NODE) {
           // Kiểm tra chính node đó
           if (node.tagName === 'IMG') {
             processImage(node);
-          } else if (node.tagName === 'VIDEO') {
-            processVideo(node);
           }
           
-          // Kiểm tra các children
+          // Kiểm tra các img children
           if (node.querySelectorAll) {
             node.querySelectorAll('img').forEach(processImage);
-            node.querySelectorAll('video').forEach(processVideo);
           }
         }
       });
@@ -197,11 +143,11 @@
     isProxyEnabled = result.proxyEnabled || false;
     console.log('MaxImg Proxy content script loaded - Proxy enabled:', isProxyEnabled);
     
-    // Xử lý tất cả media elements hiện có
+    // Xử lý tất cả images hiện có
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', processAllMediaElements);
+      document.addEventListener('DOMContentLoaded', processAllImages);
     } else {
-      processAllMediaElements();
+      processAllImages();
     }
   });
   
@@ -210,16 +156,25 @@
     if (namespace === 'local' && changes.proxyEnabled) {
       isProxyEnabled = changes.proxyEnabled.newValue;
       console.log('Proxy state changed:', isProxyEnabled);
-      processAllMediaElements();
+      processAllImages();
     }
   });
   
-  // Xử lý khi có images/videos mới load bằng JavaScript
+  // Xử lý khi có images mới load bằng JavaScript
   document.addEventListener('load', (e) => {
     if (e.target.tagName === 'IMG') {
       processImage(e.target);
-    } else if (e.target.tagName === 'VIDEO') {
-      processVideo(e.target);
+    }
+  }, true);
+  
+  // Xử lý khi có lỗi loading image (fallback to original)
+  document.addEventListener('error', (e) => {
+    if (e.target.tagName === 'IMG' && isProxyUrl(e.target.src)) {
+      console.warn('Image proxy failed, fallback to original:', e.target.src);
+      const originalSrc = restoreOriginalUrl(e.target.src);
+      if (originalSrc !== e.target.src) {
+        e.target.src = originalSrc;
+      }
     }
   }, true);
   
